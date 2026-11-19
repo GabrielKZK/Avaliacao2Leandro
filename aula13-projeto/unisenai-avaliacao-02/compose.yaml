@@ -1,0 +1,131 @@
+name: unisenai-av02-${AV02_ID:-aluno}
+
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:80"
+    networks:
+      - web_net
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    # Limites de recursos: o frontend só serve arquivos estáticos e faz proxy.
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 100
+    # Privilégios: nenhuma capability, exceto o mínimo que o Nginx usa para
+    # abrir a porta 80, trocar de usuário e ajustar donos dos diretórios temporários.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - NET_BIND_SERVICE
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}"
+    expose:
+      - "8000"
+    networks:
+      - web_net
+      - data_net
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    # Limites de recursos.
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 100
+    # Privilégios: já roda como usuário sem root (ver backend/Dockerfile);
+    # aqui removemos todas as capabilities e deixamos o sistema de arquivos somente leitura.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Readiness: só fica healthy se a API consegue falar com o banco.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    networks:
+      - data_net
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    restart: unless-stopped
+    # Limites de recursos.
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 200
+    # Privilégios: o entrypoint do PostgreSQL precisa ajustar donos de arquivos
+    # e trocar para o usuário "postgres"; todo o resto das capabilities é removido.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+networks:
+  # frontend e backend conversam aqui.
+  web_net:
+    driver: bridge
+  # backend e banco conversam aqui; "internal" bloqueia saída para a internet
+  # e o db não publica a porta 5432 no host.
+  data_net:
+    driver: bridge
+    internal: true
+
+volumes:
+  pgdata:
